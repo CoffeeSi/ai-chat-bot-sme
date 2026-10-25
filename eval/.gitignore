@@ -1,0 +1,33 @@
+
+# Private evaluation data and local results
+data/
+private/
+secrets/
+*.csv
+*.json
+*.jsonl
+*.xlsx
+*.xls
+*.parquet
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated evaluation outputs and logs
+results/
+outputs/
+reports/
+logs/
+*.log
+
+# Local configuration and credentials
+.env
+.env.*
+*.pem
+*.key
+credentials*
+
+# Local caches
+__pycache__/
+.pytest_cache/
+.cache/
