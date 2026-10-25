@@ -1,8 +1,8 @@
 """Ядро RAG по базе вопросов и ответов Ozon (ozon.db).
 
 Как это работает:
-  1. build_index   : описания, характеристики и ответы -> лексический индекс BM25.
-  2. retrieve      : совпадения слов -> оценка BM25 с приоритетом выбранной карточки.
+  1. build_index   : описания, характеристики и ответы -> BM25 или векторный индекс.
+  2. retrieve      : BM25 или мультиязычная близость E5 с приоритетом выбранной карточки.
   3. build_prompt  : найденные записи + вопрос -> промпт для языковой модели.
   4. LLM-клиент    : локальная Ollama.
 """
@@ -41,6 +41,7 @@ NO_ANSWER_KK = (
 )
 
 DEFAULT_ST_MODEL = "BAAI/bge-m3"
+DEFAULT_E5_MODEL = "intfloat/multilingual-e5-small"
 
 
 def question_language(question: str) -> str:
@@ -116,7 +117,7 @@ class SentenceTransformerEmbedder:
         except ImportError as e:
             raise RuntimeError(
                 "Не установлен sentence-transformers. Выполни: "
-                "pip install sentence-transformers\n"
+                "uv sync --extra embeddings\n"
                 "(или используй --embedder hash для простого поиска без нейросети)"
             ) from e
         self.model_name = model
@@ -136,14 +137,34 @@ class SentenceTransformerEmbedder:
         return np.asarray(vecs, dtype=np.float32)
 
 
+class E5Embedder(SentenceTransformerEmbedder):
+    """Asymmetric E5 retrieval: normalized passage and query vectors."""
+
+    name = "e5"
+
+    def __init__(self, model: str = DEFAULT_E5_MODEL):
+        super().__init__(model)
+        self.model.max_seq_length = 512
+        import torch
+        torch.set_num_threads(min(4, torch.get_num_threads()))
+
+    def encode(self, texts: list[str], batch_size: int = 16) -> np.ndarray:
+        return super().encode(["passage: " + text for text in texts], batch_size)
+
+    def encode_query(self, text: str) -> np.ndarray:
+        return super().encode(["query: " + text], 1)[0]
+
+
 def get_embedder(name: str, model: str | None = None):
+    if name == "e5":
+        return E5Embedder(model or DEFAULT_E5_MODEL)
     if name == "bm25":
         return BM25Tokenizer()
     if name == "hash":
         return HashEmbedder()
     if name == "st":
         return SentenceTransformerEmbedder(model or DEFAULT_ST_MODEL)
-    raise ValueError(f"Неизвестный способ поиска: {name} (доступны: bm25, st, hash)")
+    raise ValueError(f"Неизвестный способ поиска: {name} (доступны: bm25, e5, st, hash)")
 
 
 # --------------------------------------------------------------------------- #
@@ -309,7 +330,7 @@ def build_index(
         final_name, final_model = "bm25", None
     elif reuse_vectors:
         old = load_index(out_dir)
-        expected_model = model or DEFAULT_ST_MODEL if embedder_name == "st" else None
+        expected_model = (model or (DEFAULT_E5_MODEL if embedder_name == "e5" else DEFAULT_ST_MODEL)) if embedder_name in ("st", "e5") else None
         if (old.embedder != embedder_name or old.model != expected_model
                 or [(c["id"], c["embed_text"]) for c in old.chunks]
                 != [(c["id"], c["embed_text"]) for c in chunks]
@@ -353,6 +374,7 @@ def save_index(idx: Index, out_dir: str) -> None:
             {
                 "embedder": idx.embedder,
                 "model": idx.model,
+                "encoding": "e5-query-passage-v1" if idx.embedder == "e5" else "default",
                 "count": len(idx.chunks),
                 "products": idx.products,
                 "built_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -374,6 +396,8 @@ def load_index(out_dir: str) -> Index:
             f"Индекс не найден в {out_dir}. Сначала запусти rag_index.py."
         )
     meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+    if meta["embedder"] == "e5" and meta.get("encoding") != "e5-query-passage-v1":
+        raise ValueError("E5 index has incompatible prefixes; rebuild with --embedder e5.")
     chunks = json.loads((d / "chunks.json").read_text(encoding="utf-8"))
     bm25 = None
     if meta["embedder"] == "bm25":
@@ -440,6 +464,8 @@ def retrieve(
     top_k: int = 6,
     min_score: float | None = None,
     strict: bool = False,
+    *,
+    expand_query: bool = True,
 ) -> list[Hit]:
     """Ближайшие записи. Если выбрана карточка: сначала её записи, остаток добираем по другим.
 
@@ -449,12 +475,15 @@ def retrieve(
     if idx.embedder == "bm25":
         if idx.bm25 is None:
             raise ValueError("BM25 index is missing.")
-        sims = idx.bm25.scores(search_question(question) if question_language(question) == "kk" else question)
+        sims = idx.bm25.scores(search_question(question) if expand_query and question_language(question) == "kk" else question)
         threshold = 0.0 if min_score is None else min_score
     else:
-        q = embedder.encode([question])[0]
+        q = embedder.encode_query(question) if idx.embedder == "e5" else embedder.encode([question])[0]
         sims = idx.vectors @ q
-        threshold = 0.4 if min_score is None else min_score
+        # E5 similarities are compressed: these are development defaults, not confidence.
+        # A known SKU already narrows the candidate space; do not apply a global gate.
+        default_threshold = (0.7 if item_id else 0.8) if idx.embedder == "e5" else 0.4
+        threshold = default_threshold if min_score is None else min_score
     order = np.argsort(-(sims + idx.priors), kind="stable")
 
     own: list[Hit] = []
@@ -655,7 +684,14 @@ def auto_provider() -> str:
 # --------------------------------------------------------------------------- #
 
 
-def answer_question(
+@dataclass
+class AnswerResult:
+    text: str
+    hits: list[Hit]
+    method: str  # no_data | retrieval | template | llm
+
+
+def answer_question_detailed(
     idx: Index,
     embedder,
     llm,
@@ -664,35 +700,45 @@ def answer_question(
     top_k: int = 6,
     min_score: float | None = None,
     strict: bool = False,
-) -> tuple[str, list[Hit]]:
+    use_templates: bool = True,
+) -> AnswerResult:
     """Возвращает (текст ответа, использованные записи).
 
     Если подходящих записей нет, LLM не вызывается: бот честно говорит, что не знает.
     """
     hits = retrieve(idx, embedder, question, item_id, top_k, min_score, strict)
     if not hits:
-        return no_answer_text(question), []
+        return AnswerResult(no_answer_text(question), [], "no_data")
     if llm is None:
-        return (
+        return AnswerResult(
             "(режим без языковой модели: ниже найденные записи)\n\n"
-            + "\n\n".join(format_record(i, h) for i, h in enumerate(hits, 1))
-        ), hits
+            + "\n\n".join(format_record(i, h) for i, h in enumerate(hits, 1)),
+            hits, "retrieval",
+        )
     # Keep citations aligned with the limited context actually sent to the model.
     if item_id:
         hits = [h for h in hits if h.same_item is True]
     hits = hits[:3]
     if not hits:
-        return no_answer_text(question), []
+        return AnswerResult(no_answer_text(question), [], "no_data")
     fields = [h for h in hits if focused_fields(h.chunk, question)]
     if fields:
         hits = [h for h in hits if h in fields or h.chunk.get("source") != "product"]
-    if question_language(question) == "kk" and not any(h.chunk.get("source") != "product" for h in hits):
+    if use_templates and question_language(question) == "kk" and not any(h.chunk.get("source") != "product" for h in hits):
         facts = [(grounded_kazakh_fact(question, h.chunk), h) for h in hits]
         supported = [(text, hit) for text, hit in facts if text]
         # Conflicting source values must go to the model rather than being hidden.
         if supported and len({text for text, _ in supported}) == 1:
-            return supported[0][0], [hit for _, hit in supported]
+            return AnswerResult(supported[0][0], [hit for _, hit in supported], "template")
     system, user = build_prompt(
         question, hits, idx.products.get(item_id) if item_id else None
     )
-    return llm.complete(system, user), hits
+    return AnswerResult(llm.complete(system, user), hits, "llm")
+
+
+def answer_question(idx, embedder, llm, question, item_id=None, top_k=6,
+                    min_score=None, strict=False, use_templates=True) -> tuple[str, list[Hit]]:
+    """Compatibility helper; detailed callers also receive the answer method."""
+    result = answer_question_detailed(idx, embedder, llm, question, item_id,
+                                      top_k, min_score, strict, use_templates)
+    return result.text, result.hits

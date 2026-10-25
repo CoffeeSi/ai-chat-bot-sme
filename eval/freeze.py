@@ -12,7 +12,7 @@ from pathlib import Path
 
 from rmt_assignment3_project.config.rag import load_index
 
-SETTINGS = ("RAG_LLM_PROVIDER", "RAG_LLM_MODEL", "RAG_MIN_SCORE", "RAG_TOP_K", "RATE_LIMIT_PER_MIN",
+SETTINGS = ("RAG_INDEX_DIR", "RAG_LLM_PROVIDER", "RAG_LLM_MODEL", "RAG_MIN_SCORE", "RAG_TOP_K", "RATE_LIMIT_PER_MIN",
             "OLLAMA_BASE_URL", "OLLAMA_TIMEOUT_SECONDS", "OLLAMA_NUM_CTX", "OLLAMA_NUM_PREDICT",
             "OLLAMA_TEMPERATURE", "OLLAMA_KEEP_ALIVE", "OLLAMA_REPEAT_PENALTY", "OLLAMA_REPEAT_LAST_N")
 
@@ -44,7 +44,10 @@ def main():
         if q["type"] == "no_qa":
             assert q["expected_sku"] not in with_qa, q["id"]
     indices = {}
-    for name in ("rag_index", "rag_index_hash"):
+    names = ["rag_index", "rag_index_hash"]
+    if Path("data/rag_index_e5/meta.json").exists():
+        names.append("rag_index_e5")
+    for name in names:
         idx = load_index(f"data/{name}")
         seller_records = [c for c in idx.chunks if any(a["is_seller"] for a in c["answers"])]
         assert len(seller_records) == 34, (name, len(seller_records))
@@ -58,6 +61,7 @@ def main():
             question_file, Path("data/ozon.db"), Path("data/questions.json"),
             Path("pyproject.toml"), Path("uv.lock")]
     files += list(Path("src/rmt_assignment3_project/web").glob("*")) + list(Path("scripts").glob("*.ps1"))
+    files += [Path("eval/compare_search.py")]
     files += [file for file in (Path(".env.example"), Path("data/products.json"),
               Path("eval/questions_answerable.csv"), Path("eval/questions_answerable_reference.json")) if file.exists()]
     for name in indices:

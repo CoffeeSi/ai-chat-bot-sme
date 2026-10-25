@@ -14,7 +14,7 @@ import sys
 
 from rmt_assignment3_project.config.paths import DB_PATH, INDEX_DIR, data_path
 
-from rmt_assignment3_project.config.rag import DEFAULT_ST_MODEL, build_index
+from rmt_assignment3_project.config.rag import DEFAULT_ST_MODEL, DEFAULT_E5_MODEL, build_index
 
 
 def main() -> int:
@@ -23,14 +23,14 @@ def main() -> int:
     ap.add_argument("--out", default=str(INDEX_DIR), help="папка для индекса")
     ap.add_argument(
         "--embedder",
-        choices=["bm25", "st", "hash"],
+        choices=["bm25", "e5", "st", "hash"],
         default="bm25",
-        help="bm25: поиск по словам; st: опциональные эмбеддинги; hash: контрольный поиск",
+        help="bm25: слова; e5: мультиязычный E5; st: другие эмбеддинги; hash: контрольный поиск",
     )
     ap.add_argument(
         "--model",
-        default=DEFAULT_ST_MODEL,
-        help=f"модель для --embedder st (по умолчанию {DEFAULT_ST_MODEL})",
+        default=None,
+        help=f"e5: {DEFAULT_E5_MODEL}; st: {DEFAULT_ST_MODEL}",
     )
     ap.add_argument(
         "--include-unanswered",

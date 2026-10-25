@@ -10,7 +10,7 @@
     OLLAMA_BASE_URL        http://127.0.0.1:11434 для локальной Ollama
     API_KEY                ключ доступа к этому API (заголовок X-API-Key); без него API открыт всем
     CORS_ORIGINS           разрешённые сайты через запятую, например https://shop.example.kz
-    RAG_MIN_SCORE          порог BM25 (по умолчанию 0; нужны совпадающие слова)
+    RAG_MIN_SCORE          BM25 >0; E5 0.8 глобально / 0.7 с SKU (начальные, без калибровки)
     RAG_TOP_K              сколько записей давать модели (по умолчанию 6)
     RATE_LIMIT_PER_MIN     запросов /ask в минуту с одного IP (по умолчанию 30, 0 = без лимита)
 
@@ -40,7 +40,7 @@ from rmt_assignment3_project.config.paths import INDEX_DIR, data_path
 from rmt_assignment3_project.config.rag import (
     Index,
     LLMError,
-    answer_question,
+    answer_question_detailed,
     auto_provider,
     get_embedder,
     load_index,
@@ -65,7 +65,7 @@ class Settings:
     model: str | None = None
     api_key: str | None = None
     cors_origins: tuple[str, ...] = ()
-    min_score: float = 0.0
+    min_score: float | None = None
     top_k: int = 6
     rate_limit_per_min: int = 30
 
@@ -81,7 +81,7 @@ class Settings:
             model=env("RAG_LLM_MODEL") or None,
             api_key=env("API_KEY") or None,
             cors_origins=origins,
-            min_score=float(env("RAG_MIN_SCORE", "0")),
+            min_score=float(env("RAG_MIN_SCORE")) if env("RAG_MIN_SCORE") else None,
             top_k=int(env("RAG_TOP_K", "6")),
             rate_limit_per_min=int(env("RATE_LIMIT_PER_MIN", "30")),
         )
@@ -99,6 +99,10 @@ class _LockedEmbedder:
     def encode(self, texts):
         with self.lock:
             return self.inner.encode(texts)
+
+    def encode_query(self, text):
+        with self.lock:
+            return self.inner.encode_query(text)
 
 
 @dataclass
@@ -152,6 +156,7 @@ class RateLimiter:
 
 
 class AskRequest(BaseModel):
+    use_templates: bool = Field(default=True, description="Разрешить ответы по шаблонам для точных фактов; false для отдельной оценки LLM")
     question: str = Field(
         min_length=2, max_length=1000, description="Вопрос покупателя"
     )
@@ -186,7 +191,7 @@ class SourceOut(BaseModel):
     item_id: str | None
     product: str | None
     date: str | None
-    score: float = Field(description="BM25: неотрицательная оценка без верхней границы; не вероятность.")
+    score: float = Field(description="BM25: без верхней границы; cosine: [-1, 1]. Это не вероятность уверенности.")
     score_type: str = "bm25"
     same_item: bool | None
     question: str
@@ -201,6 +206,7 @@ class ItemOut(BaseModel):
 
 
 class AskResponse(BaseModel):
+    answer_method: str = Field(description="no_data, retrieval, template или llm: как сформирован ответ")
     answer: str
     answered: bool = Field(
         description="false: подходящих записей не нашлось, модель не вызывалась"
@@ -220,6 +226,7 @@ class HealthOut(BaseModel):
     status: str
     records: int
     embedder: str
+    embedding_model: str | None = None
     llm: str
     llm_model: str | None = None
 
@@ -297,6 +304,7 @@ def create_app(
             status="ok",
             records=len(rag.idx.chunks),
             embedder=rag.idx.embedder,
+            embedding_model=rag.idx.model,
             llm=rag.provider if rag.llm is not None else "none",
             llm_model=getattr(rag.llm, "model", None),
         )
@@ -332,7 +340,7 @@ def create_app(
                 raise HTTPException(400, str(e))
 
         try:
-            text, hits = answer_question(
+            result = answer_question_detailed(
                 rag.idx,
                 rag.embedder,
                 rag.llm,
@@ -341,6 +349,7 @@ def create_app(
                 req.top_k or settings.top_k,
                 settings.min_score if req.min_score is None else req.min_score,
                 req.strict,
+                req.use_templates,
             )
         except LLMError as e:
             log.error(
@@ -349,10 +358,12 @@ def create_app(
             code = e.upstream_status if e.upstream_status in (502, 503, 504) else 502
             raise HTTPException(code, str(e), headers={"Retry-After": "10"} if code == 503 else None)
 
+        text, hits = result.text, result.hits
         return AskResponse(
+            answer_method=result.method,
             answer=text,
             answered=bool(hits),
-            llm_model=getattr(rag.llm, "model", None) if hits else None,
+            llm_model=getattr(rag.llm, "model", None) if result.method == "llm" else None,
             item=ItemOut(item_id=item_id, name=item_name) if item_id else None,
             sources=[
                 SourceOut(

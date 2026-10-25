@@ -190,14 +190,21 @@ def _post(client, base, key, body, with_key=True):
     return r, time.perf_counter() - t
 
 
+def check_health_configuration(health, index_path):
+    expected = load_index(index_path)
+    if health.get("llm_model") != os.environ.get("RAG_LLM_MODEL"):
+        sys.exit("Модель запущенного API не совпадает с зафиксированной: перезапустите сервер.")
+    if health.get("embedder") != expected.embedder or health.get("embedding_model") != expected.model:
+        sys.exit("Поиск запущенного API не совпадает с выбранным индексом: проверьте RAG_INDEX_DIR и перезапустите сервер.")
+
+
 def cmd_api(a) -> None:
     key = a.key or os.environ.get("API_KEY", "")
     qs = [q for q in read_questions(a.questions) if q["type"] != "oos"][: a.n]
     res: dict = {"base": a.base, "time": time.strftime("%Y-%m-%d %H:%M:%S")}
     with httpx.Client() as c:
         h = c.get(f"{a.base}/health", timeout=30).json()
-        if h.get("llm_model") != os.environ.get("RAG_LLM_MODEL"):
-            sys.exit("Модель запущенного API не совпадает с зафиксированной: перезапустите сервер.")
+        check_health_configuration(h, a.index)
         res["health"] = h
         print("health:", h)
 
@@ -260,24 +267,24 @@ def cmd_answers(a) -> None:
     rows = []
     with httpx.Client() as c:
         health = c.get(f"{a.base}/health", timeout=30).json()
-        if health.get("llm_model") != os.environ.get("RAG_LLM_MODEL"):
-            sys.exit("Модель запущенного API не совпадает с зафиксированной: перезапустите сервер.")
+        check_health_configuration(health, a.index)
         for q in qs:
             for run in range(1, a.runs + 1):
                 time.sleep(a.pause)
-                body = {"question": q["question"], "item": (q["expected_sku"] or None) if q["type"] != "oos" else None}
+                body = {"question": q["question"], "item": (q["expected_sku"] or None) if q["type"] != "oos" else None,
+                        "use_templates": not a.no_templates, "strict": q["type"] != "oos"}
                 try:
                     r, dt = _post(c, a.base, key, body)
                 except httpx.HTTPError as exc:
                     rows.append({"id": q["id"], "run": run, "type": q["type"], "question": q["question"],
-                                 "answer": type(exc).__name__, "answered": "", "sources": "", "llm_model": "",
+                                 "answer": type(exc).__name__, "answered": "", "sources": "", "llm_model": "", "answer_method": "error",
                                  "rater1": "", "rater2": ""})
                     write_csv(OUT / "groundedness_sheet.csv", rows)
                     print(f"T5 {len(rows)}/{len(qs) * a.runs}: {q['id']} {type(exc).__name__}", flush=True)
                     continue
                 if r.status_code != 200:
                     rows.append({"id": q["id"], "run": run, "type": q["type"], "question": q["question"],
-                                 "answer": f"HTTP {r.status_code}", "answered": "", "sources": "", "llm_model": "",
+                                 "answer": f"HTTP {r.status_code}", "answered": "", "sources": "", "llm_model": "", "answer_method": "error",
                                  "rater1": "", "rater2": ""})
                     write_csv(OUT / "groundedness_sheet.csv", rows)
                     print(f"T5 {len(rows)}/{len(qs) * a.runs}: {q['id']} run={run} HTTP {r.status_code}", flush=True)
@@ -285,7 +292,7 @@ def cmd_answers(a) -> None:
                 j = r.json()
                 src = " || ".join(f"{s['score']:.2f} | {s['item_id']} | {snippet(s)}" for s in j["sources"])
                 rows.append({"id": q["id"], "run": run, "type": q["type"], "question": q["question"],
-                             "answer": j["answer"], "answered": j["answered"], "sources": src, "llm_model": j.get("llm_model"),
+                             "answer": j["answer"], "answered": j["answered"], "sources": src, "llm_model": j.get("llm_model"), "answer_method": j.get("answer_method", "unknown"),
                              "rater1": "", "rater2": ""})
                 write_csv(OUT / "groundedness_sheet.csv", rows)
                 print(f"T5 {len(rows)}/{len(qs) * a.runs}: {q['id']} run={run} HTTP {r.status_code}", flush=True)
@@ -321,10 +328,11 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["retrieval", "retrieval-summary", "api", "answers", "ratings"])
     ap.add_argument("--questions", default="eval/questions.csv" if Path("eval/questions.csv").exists() else "eval/questions_answerable.csv")
-    ap.add_argument("--index", default=str(INDEX_DIR))
+    ap.add_argument("--index", default=str(data_path(os.environ.get("RAG_INDEX_DIR") or str(INDEX_DIR))))
+    ap.add_argument("--no-templates", action="store_true", help="T5: измерять генерацию LLM отдельно от шаблонных ответов")
     ap.add_argument("--hash-index", default=str(data_path("rag_index_hash")))
     ap.add_argument("--top-k", type=int, default=6)
-    ap.add_argument("--min-score", type=float, default=None, help="по умолчанию порог выбранного метода: BM25 >0, векторный >=0.4")
+    ap.add_argument("--min-score", type=float, default=None, help="порог метода: BM25 >0, E5 0.8 глобально / 0.7 с SKU, остальные векторы 0.4")
     ap.add_argument("--base", default="http://127.0.0.1:8000")
     ap.add_argument("--key", default="")
     ap.add_argument("--n", type=int, default=20, help="сколько вопросов брать для замера задержки")

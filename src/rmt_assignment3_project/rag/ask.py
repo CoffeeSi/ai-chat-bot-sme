@@ -16,13 +16,14 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 
 from rmt_assignment3_project.config.paths import INDEX_DIR, data_path
 from rmt_assignment3_project.config.rag import (
     Index,
     LLMError,
-    answer_question,
+    answer_question_detailed,
     auto_provider,
     get_embedder,
     load_index,
@@ -57,7 +58,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="RAG-бот по базе вопросов Ozon")
     ap.add_argument("question", nargs="?", help="вопрос; без него запускается диалог")
     ap.add_argument("--item", help="карточка: артикул, ссылка или часть названия")
-    ap.add_argument("--index", default=str(INDEX_DIR), help="папка с индексом")
+    ap.add_argument("--index", default=os.environ.get("RAG_INDEX_DIR") or str(INDEX_DIR), help="папка с индексом; по умолчанию RAG_INDEX_DIR")
+    ap.add_argument("--no-templates", action="store_true", help="оценивать генерацию LLM без шаблонных ответов")
     ap.add_argument(
         "--llm",
         choices=["ollama", "none"],
@@ -70,8 +72,8 @@ def main() -> int:
     ap.add_argument(
         "--min-score",
         type=float,
-        default=None,
-        help="минимальная оценка поиска: BM25 по умолчанию >0; векторный поиск >=0.4",
+        default=float(os.environ["RAG_MIN_SCORE"]) if os.environ.get("RAG_MIN_SCORE") else None,
+        help="BM25 >0; E5: 0.8 глобально, 0.7 с SKU (начальные пороги); другие векторы: 0.4",
     )
     ap.add_argument(
         "--strict",
@@ -96,7 +98,7 @@ def main() -> int:
 
     def ask(question: str) -> None:
         try:
-            text, hits = answer_question(
+            result = answer_question_detailed(
                 idx,
                 embedder,
                 llm,
@@ -105,11 +107,13 @@ def main() -> int:
                 args.top_k,
                 args.min_score,
                 args.strict,
+                not args.no_templates,
             )
         except LLMError as e:
             print(f"Ошибка языковой модели: {e}", file=sys.stderr)
             return
-        if hits and llm is not None:
+        text, hits = result.text, result.hits
+        if result.method == "llm":
             print(f"\nМодель: {getattr(llm, 'model', provider)}")
         print(f"\n{text}")
         if not args.no_sources:

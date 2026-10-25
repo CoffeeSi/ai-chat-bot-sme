@@ -6,7 +6,7 @@ if (-not (Test-Path -LiteralPath '.env')) {
     Copy-Item -LiteralPath '.env.example' -Destination '.env'
 }
 # Keep .env parsing consistent with the Python application, including BOM and quotes.
-$taskConfig = & uv run python -c 'import json,os; from rmt_assignment3_project.config import rag; print(json.dumps(dict(provider=os.getenv(''RAG_LLM_PROVIDER''),model=os.getenv(''RAG_LLM_MODEL'',''kazllm:latest''),url=os.getenv(''OLLAMA_BASE_URL'',''http://127.0.0.1:11434''))))'
+$taskConfig = & uv run --extra embeddings python -c 'import json,os; from rmt_assignment3_project.config import rag; print(json.dumps(dict(provider=os.getenv(''RAG_LLM_PROVIDER''),model=os.getenv(''RAG_LLM_MODEL'',''qwen2.5:7b''),url=os.getenv(''OLLAMA_BASE_URL'',''http://127.0.0.1:11434''))))'
 if ($LASTEXITCODE -ne 0) { throw 'Cannot read local model configuration. Run uv sync first.' }
 $taskSettings = $taskConfig | ConvertFrom-Json
 if ($taskSettings.provider -ne 'ollama') { throw 'Set RAG_LLM_PROVIDER=ollama in .env first.' }
@@ -54,5 +54,5 @@ try {
 }
 Write-Host "Local model: $($taskSettings.model)"
 Write-Host 'Chat: http://127.0.0.1:8000 (wait for Application startup complete)'
-& uv run uvicorn rmt_assignment3_project.api.api:app --host 127.0.0.1 --port 8000
+& uv run --extra embeddings uvicorn rmt_assignment3_project.api.api:app --host 127.0.0.1 --port 8000
 exit $LASTEXITCODE
