@@ -5,12 +5,12 @@
 
 Настройки через переменные окружения:
     RAG_INDEX_DIR          папка индекса (по умолчанию rag_index)
-    RAG_LLM_PROVIDER       gemini | anthropic | none (по умолчанию определяется по ключам)
+    RAG_LLM_PROVIDER       ollama | none (по умолчанию ollama)
     RAG_LLM_MODEL          имя модели
-    GEMINI_API_KEY / ANTHROPIC_API_KEY   ключи языковой модели
+    OLLAMA_BASE_URL        http://127.0.0.1:11434 для локальной Ollama
     API_KEY                ключ доступа к этому API (заголовок X-API-Key); без него API открыт всем
     CORS_ORIGINS           разрешённые сайты через запятую, например https://shop.example.kz
-    RAG_MIN_SCORE          порог близости (по умолчанию 0.4)
+    RAG_MIN_SCORE          порог BM25 (по умолчанию 0; нужны совпадающие слова)
     RAG_TOP_K              сколько записей давать модели (по умолчанию 6)
     RATE_LIMIT_PER_MIN     запросов /ask в минуту с одного IP (по умолчанию 30, 0 = без лимита)
 
@@ -61,11 +61,11 @@ _UNSET = object()
 @dataclass
 class Settings:
     index_dir: str = str(INDEX_DIR)
-    provider: str | None = None  # None: определить по ключам
+    provider: str | None = None  # None: локальная Ollama
     model: str | None = None
     api_key: str | None = None
     cors_origins: tuple[str, ...] = ()
-    min_score: float = 0.4
+    min_score: float = 0.0
     top_k: int = 6
     rate_limit_per_min: int = 30
 
@@ -81,7 +81,7 @@ class Settings:
             model=env("RAG_LLM_MODEL") or None,
             api_key=env("API_KEY") or None,
             cors_origins=origins,
-            min_score=float(env("RAG_MIN_SCORE", "0.4")),
+            min_score=float(env("RAG_MIN_SCORE", "0")),
             top_k=int(env("RAG_TOP_K", "6")),
             rate_limit_per_min=int(env("RATE_LIMIT_PER_MIN", "30")),
         )
@@ -161,7 +161,7 @@ class AskRequest(BaseModel):
         description="Карточка: артикул, ссылка или часть названия",
     )
     top_k: int | None = Field(default=None, ge=1, le=15)
-    min_score: float | None = Field(default=None, ge=0.0, le=1.0)
+    min_score: float | None = Field(default=None, ge=0.0, allow_inf_nan=False, description="Минимальная оценка поиска. BM25 не ограничен единицей.")
     strict: bool = Field(
         default=False, description="искать только по выбранной карточке"
     )
@@ -186,7 +186,8 @@ class SourceOut(BaseModel):
     item_id: str | None
     product: str | None
     date: str | None
-    score: float
+    score: float = Field(description="BM25: неотрицательная оценка без верхней границы; не вероятность.")
+    score_type: str = "bm25"
     same_item: bool | None
     question: str
     answers: list[AnswerOut]
@@ -345,10 +346,8 @@ def create_app(
             log.error(
                 "Ошибка языковой модели: %s", e
             )  # детали только в лог, наружу не отдаём
-            if e.upstream_status in (429, 500, 502, 503, 504):
-                raise HTTPException(503, "Сервис Gemini перегружен. Попробуйте повторить вопрос позже.",
-                                    headers={"Retry-After": "10"})
-            raise HTTPException(502, "Не удалось получить ответ языковой модели")
+            code = e.upstream_status if e.upstream_status in (502, 503, 504) else 502
+            raise HTTPException(code, str(e), headers={"Retry-After": "10"} if code == 503 else None)
 
         return AskResponse(
             answer=text,
@@ -362,6 +361,7 @@ def create_app(
                     product=h.chunk["product"],
                     date=h.chunk["date"],
                     score=round(h.score, 4),
+                    score_type="bm25" if rag.idx.embedder == "bm25" else "cosine",
                     same_item=h.same_item,
                     question=h.chunk["question"],
                     source=h.chunk.get("source", "qa"),

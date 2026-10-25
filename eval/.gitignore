@@ -6,7 +6,7 @@ secrets/
 *.csv
 *.json
 *.jsonl
-*.xlsx
+*.xlsxg
 *.xls
 *.parquet
 *.db

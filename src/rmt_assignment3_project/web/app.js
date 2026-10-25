@@ -261,7 +261,8 @@ async function api(path, options = {}) {
     if (response.status === 401) message = "Нужен ключ доступа к поддержке. Укажите его в настройках подключения.";
     if (response.status === 429) message = "Слишком много вопросов подряд. Подождите минуту и попробуйте ещё раз.";
     if (response.status === 502) message = "Помощник временно недоступен. Ваш вопрос сохранён — попробуйте повторить запрос.";
-    if (response.status === 503) message = "Gemini сейчас перегружена. Подождите немного и повторите вопрос.";
+    if (response.status === 503 && typeof data.detail !== "string") message = "Помощник временно недоступен. Попробуйте повторить вопрос позже.";
+    if (response.status === 504) message = "Модель не успела ответить. При первом запуске загрузка может занять больше времени. Попробуйте ещё раз.";
     throw new RequestError(message, response.status);
   }
   return data;

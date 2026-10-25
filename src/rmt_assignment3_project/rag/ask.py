@@ -8,9 +8,9 @@
     python rag_ask.py "Чем смывать?" --llm none
 
 Языковая модель выбирается так:
-    ANTHROPIC_API_KEY задан             -> Claude API (модель из --model или RAG_LLM_MODEL)
-    GEMINI_API_KEY задан               -> Gemini через Google Gen AI SDK
-    ничего не задано                    -> только найденные записи
+    RAG_LLM_PROVIDER=ollama              -> локальная модель Ollama, ключ не нужен
+    по умолчанию                        -> локальная Ollama
+    --llm none                          -> только найденные записи
 """
 
 from __future__ import annotations
@@ -60,7 +60,7 @@ def main() -> int:
     ap.add_argument("--index", default=str(INDEX_DIR), help="папка с индексом")
     ap.add_argument(
         "--llm",
-        choices=["gemini", "anthropic", "none"],
+        choices=["ollama", "none"],
         help="языковая модель (по умолчанию определяется по переменным окружения)",
     )
     ap.add_argument("--model", help="имя модели для --llm")
@@ -70,8 +70,8 @@ def main() -> int:
     ap.add_argument(
         "--min-score",
         type=float,
-        default=0.4,
-        help="порог близости (0-1): ниже запись считается неподходящей",
+        default=None,
+        help="минимальная оценка поиска: BM25 по умолчанию >0; векторный поиск >=0.4",
     )
     ap.add_argument(
         "--strict",
@@ -93,13 +93,6 @@ def main() -> int:
     except (FileNotFoundError, ValueError, RuntimeError, LLMError) as e:
         print(f"Ошибка: {e}", file=sys.stderr)
         return 1
-
-    if provider == "none" and not args.llm:
-        print(
-            "Ключ языковой модели не найден (GEMINI_API_KEY / ANTHROPIC_API_KEY): "
-            "показываю только найденные записи.\n",
-            file=sys.stderr,
-        )
 
     def ask(question: str) -> None:
         try:

@@ -1,6 +1,6 @@
 """Построение поискового индекса из ozon.db.
 
-    python rag_index.py                       # нейросетевые эмбеддинги bge-m3 (нужен sentence-transformers)
+    python rag_index.py                       # лексический поиск BM25 без нейросети
     python rag_index.py --embedder hash       # простой офлайн-поиск без нейросети (для проверки)
     python rag_index.py --db ozon.db --out rag_index --include-unanswered
 
@@ -23,9 +23,9 @@ def main() -> int:
     ap.add_argument("--out", default=str(INDEX_DIR), help="папка для индекса")
     ap.add_argument(
         "--embedder",
-        choices=["st", "hash"],
-        default="st",
-        help="st: нейросеть (sentence-transformers), hash: простой офлайн-поиск",
+        choices=["bm25", "st", "hash"],
+        default="bm25",
+        help="bm25: поиск по словам; st: опциональные эмбеддинги; hash: контрольный поиск",
     )
     ap.add_argument(
         "--model",
@@ -58,7 +58,7 @@ def main() -> int:
         f"Готово: {len(idx.chunks)} записей по {n_items} карточкам "
         f"(с ответом продавца: {n_seller}) -> {args.out}/"
     )
-    print(f"Эмбеддер: {idx.embedder}" + (f", модель {idx.model}" if idx.model else ""))
+    print(f"Поиск: {idx.embedder}" + (f", модель {idx.model}" if idx.model else ""))
     return 0
 
 

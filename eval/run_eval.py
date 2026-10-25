@@ -11,7 +11,7 @@
        uv run python -m rmt_assignment3_project.rag.index --embedder hash --out rag_index_hash
 
 Команды:
-  uv run python eval/run_eval.py retrieval            # T1, T2 (без сервера и без ключа Gemini)
+  uv run python eval/run_eval.py retrieval            # T1, T2 (без сервера и без ключа LLM)
   uv run python eval/run_eval.py api                  # T3, T4 (сервер должен быть запущен)
   uv run python eval/run_eval.py answers              # лист оценки ответов для T5 (3 прогона)
   uv run python eval/run_eval.py ratings              # итог T5 после заполнения rater1/rater2
@@ -104,9 +104,9 @@ def write_csv(path: Path, rows: list[dict]) -> None:
 # --------------------------------------------------------------------------- T1, T2
 def cmd_retrieval(a) -> None:
     qs = read_questions(a.questions)
-    neural = load_index(a.index)
-    emb = get_embedder(neural.embedder, neural.model)
-    conds = [("C1", neural, emb, True), ("C2", neural, emb, False)]
+    primary = load_index(a.index)
+    emb = get_embedder(primary.embedder, primary.model)
+    conds = [("C1", primary, emb, True), ("C2", primary, emb, False)]
     hp = Path(a.hash_index)
     if (hp / "meta.json").exists():
         h = load_index(str(hp))
@@ -124,7 +124,7 @@ def cmd_retrieval(a) -> None:
             hits = retrieve(idx, e, q["question"], item, a.top_k, a.min_score)
             rank = next((i for i, x in enumerate(hits, 1) if x.chunk["item_id"] == q["expected_sku"]), None)
             row = {
-                "id": q["id"], "type": q["type"], "condition": name, "question": q["question"],
+                "id": q["id"], "type": q["type"], "condition": name, "retriever": idx.embedder, "question": q["question"],
                 "expected_sku": q["expected_sku"], "n_hits": len(hits),
                 "item_rank": rank or "", "item_hit": int(rank is not None) if q["type"] != "oos" else "",
                 "record_relevant": "",  # заполняется вручную: 0/1, есть ли в top-k нужная информация
@@ -185,7 +185,8 @@ def summarize_retrieval() -> None:
 def _post(client, base, key, body, with_key=True):
     h = {"X-API-Key": key} if (with_key and key) else {}
     t = time.perf_counter()
-    r = client.post(f"{base}/ask", json=body, headers=h, timeout=180)
+    timeout = max(180, float(os.environ.get("OLLAMA_TIMEOUT_SECONDS", "120")) + 30) if os.environ.get("RAG_LLM_PROVIDER") == "ollama" else 180
+    r = client.post(f"{base}/ask", json=body, headers=h, timeout=timeout)
     return r, time.perf_counter() - t
 
 
@@ -234,7 +235,7 @@ def cmd_api(a) -> None:
                 res["T3_latency_answered_only"] = {"n": len(ans), "median": round(statistics.median(ans), 3)}
 
         # T4: доступ и лимит запросов
-        body = {"question": "проверка доступа", "min_score": 1.0}  # min_score=1.0: модель не вызывается
+        body = {"question": "проверка доступа", "min_score": 1e9}  # заведомо выше оценок корпуса; без генерации
         r0, _ = _post(c, a.base, key, body, with_key=False)
         if r0.status_code == 200:
             res["T4_access"] = "на сервере не задан API_KEY: проверка 401 неприменима (это тоже результат)"
@@ -319,11 +320,11 @@ def cmd_ratings(a) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("cmd", choices=["retrieval", "retrieval-summary", "api", "answers", "ratings"])
-    ap.add_argument("--questions", default="eval/questions.csv")
+    ap.add_argument("--questions", default="eval/questions.csv" if Path("eval/questions.csv").exists() else "eval/questions_answerable.csv")
     ap.add_argument("--index", default=str(INDEX_DIR))
     ap.add_argument("--hash-index", default=str(data_path("rag_index_hash")))
     ap.add_argument("--top-k", type=int, default=6)
-    ap.add_argument("--min-score", type=float, default=0.4)
+    ap.add_argument("--min-score", type=float, default=None, help="по умолчанию порог выбранного метода: BM25 >0, векторный >=0.4")
     ap.add_argument("--base", default="http://127.0.0.1:8000")
     ap.add_argument("--key", default="")
     ap.add_argument("--n", type=int, default=20, help="сколько вопросов брать для замера задержки")
